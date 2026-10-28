@@ -193,11 +193,10 @@ function processFolderImages(img_folder, output_folder, extension, max_row, max_
 		
 		// Ensure image is in RGB color to preserve original colors
 		if (bitDepth() != 24) {
-			// Without this, RGB Color scales pixel values using the full bit-depth
-			// range (e.g. 0-65535 for 16-bit) instead of the image's actual data
-			// range, which is what makes 12/14-bit source data come out much
-			// darker than the original once converted to RGB
-			resetMinAndMax();
+			// RGB Color maps each channel's display range onto 0-255, so every
+			// channel needs a range that matches its actual data or the tile
+			// (and therefore the montage) comes out dark
+			setDisplayRangesForRGB();
 			run("RGB Color");
 		}
 		
@@ -294,6 +293,37 @@ function extractValue(filename, letter) {
 function isDigit(char) {
 	val = parseInt(char);
 	return !isNaN(val);
+}
+
+// Function to set every channel's display range from its own data before RGB conversion
+// - resetMinAndMax() only touches the current channel of a multi-channel image, leaving
+//   the others at the full 0-65535 range (nearly black), and it also follows the
+//   Edit > Options > Appearance "16-bit range" preference, which can force 0-65535
+// - A plain min/max is thrown off by a single hot/saturated pixel, so this uses the
+//   same 0.35% saturation as Fiji's "Auto" contrast button instead
+function setDisplayRangesForRGB() {
+	getDimensions(width, height, channels, slices, frames);
+
+	// 8-bit data already fits 0-255, so keep its original intensities
+	if (bitDepth() == 8) {
+		return;
+	}
+
+	// Make sure all channels are merged into the RGB result, not just the visible one
+	if (channels > 1 && is("composite")) {
+		Stack.setDisplayMode("composite");
+	}
+
+	for (c = 1; c <= channels; c++) {
+		if (channels > 1) {
+			Stack.setChannel(c);
+		}
+		run("Enhance Contrast", "saturated=0.35");
+	}
+
+	if (channels > 1) {
+		Stack.setChannel(1);
+	}
 }
 
 // Function to recursively delete a folder and everything inside it
