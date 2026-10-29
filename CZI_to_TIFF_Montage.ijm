@@ -187,9 +187,20 @@ function processFolderImages(img_folder, output_folder, extension, max_row, max_
 		path = img_folder + filename;
 		
 		// Open ZVI/CZI file using Bio-Formats
+		images_before = nImages();
 		run("Bio-Formats Importer", "open=[" + path + "] color_mode=Default concatenate_series open_all_series rois_import=[ROI manager] view=Hyperstack stack_order=XYCZT");
 		
+		// Series that can't be concatenated (e.g. a CZI's slide label/preview) open as extra
+		// windows after the main image, so make sure the main image is the one converted
+		if (nImages() - images_before > 1) {
+			print("    " + filename + " opened " + (nImages() - images_before) + " series - using the first one");
+		}
+		selectImage(images_before + 1);
+		run("Select None");
+		
 		image_title = getTitle();
+		getDimensions(width, height, channels, slices, frames);
+		print("    " + filename + ": " + bitDepth() + "-bit, " + channels + " channel(s), " + (slices * frames) + " plane(s)");
 		
 		// Ensure image is in RGB color to preserve original colors
 		if (bitDepth() != 24) {
@@ -303,24 +314,57 @@ function isDigit(char) {
 //   same 0.35% saturation as Fiji's "Auto" contrast button instead
 function setDisplayRangesForRGB() {
 	getDimensions(width, height, channels, slices, frames);
-
-	// 8-bit data already fits 0-255, so keep its original intensities
-	if (bitDepth() == 8) {
-		return;
-	}
-
-	// Make sure all channels are merged into the RGB result, not just the visible one
+	
+	shared_range = false;
 	if (channels > 1 && is("composite")) {
+		// Bio-Formats only opens a file in composite mode when its planes were stored as RGB
+		// (color camera), so those channels share one range to keep the color balance
+		Stack.getDisplayMode(display_mode);
+		shared_range = (display_mode == "composite");
+	
+		// Other multi-channel files open in "color" or "grayscale" mode, which RGB Color turns
+		// into one slice per channel - the montage would then only show channel 1
 		Stack.setDisplayMode("composite");
 	}
-
+	
+	// A channel with no color in the file's metadata gets an all-black LUT, which hides it
 	for (c = 1; c <= channels; c++) {
 		if (channels > 1) {
 			Stack.setChannel(c);
 		}
-		run("Enhance Contrast", "saturated=0.35");
+		getLut(reds, greens, blues);
+		lut_top = maxOf(reds[255], maxOf(greens[255], blues[255]));
+		lut_bottom = maxOf(reds[0], maxOf(greens[0], blues[0]));
+		if (lut_top < 64 && lut_bottom < 64) {
+			print("    Channel " + c + " has a black color in the file's metadata - using grayscale instead");
+			run("Grays");
+		}
 	}
-
+	
+	// 8-bit data already fits 0-255, so keep its original intensities
+	if (bitDepth() != 8) {
+		range_min = newArray(channels);
+		range_max = newArray(channels);
+		for (c = 1; c <= channels; c++) {
+			if (channels > 1) {
+				Stack.setChannel(c);
+			}
+			run("Enhance Contrast", "saturated=0.35");
+			getMinAndMax(channel_min, channel_max);
+			range_min[c - 1] = channel_min;
+			range_max[c - 1] = channel_max;
+		}
+	
+		if (shared_range) {
+			Array.getStatistics(range_min, lowest, unused_max);
+			Array.getStatistics(range_max, unused_min, highest);
+			for (c = 1; c <= channels; c++) {
+				Stack.setChannel(c);
+				setMinAndMax(lowest, highest);
+			}
+		}
+	}
+	
 	if (channels > 1) {
 		Stack.setChannel(1);
 	}
@@ -368,6 +412,10 @@ function createMontage(file_list, rows, cols, max_row, max_col, output_dir, exte
 	
 	newImage("Montage", "RGB", montage_width, montage_height, 1);
 	montage_id = getImageID();
+	
+	// Edit > Paste Control's mode persists for the whole Fiji session and is applied by
+	// Paste, so force a plain copy (other modes blend, invert or mask the tiles)
+	setPasteMode("Copy");
 	
 	// Place each TIFF in correct grid position
 	for (i = 0; i < file_list.length; i++) {
